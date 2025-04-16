@@ -6,6 +6,9 @@ from pathlib import Path
 import pandas as pd
 from unstract.llmwhisperer.client_v2 import LLMWhispererClientException
 from unstract.llmwhisperer import LLMWhispererClientV2
+import PyPDF2
+import re
+from difflib import SequenceMatcher
 
 def save_extracted_text(text, file_path):
     with open(file_path, 'w', encoding='utf-8') as f:
@@ -130,3 +133,117 @@ def json_to_unified_csv(json_dir, unified_csv_path):
     except Exception as e:
         logging.error(f"Failed to create unified CSV file: {e}")
         raise
+
+def extract_text_from_pdf_direct(pdf_path):
+    """
+    Extract text directly from a PDF file without OCR.
+    
+    :param pdf_path: Path to the PDF file.
+    :return: Extracted text as a string.
+    """
+    try:
+        text = ""
+        with open(pdf_path, 'rb') as file:
+            pdf_reader = PyPDF2.PdfReader(file)
+            for page_num in range(len(pdf_reader.pages)):
+                page = pdf_reader.pages[page_num]
+                text += page.extract_text() + "\n\n"
+        
+        logging.info(f"Extracted text directly from PDF: {pdf_path}")
+        return text
+    except Exception as e:
+        logging.error(f"Failed to extract text directly from PDF {pdf_path}: {e}")
+        raise RuntimeError(f"Error extracting text directly from PDF {pdf_path}: {e}")
+
+def find_matching_lab_result(patient_name, lab_dir):
+    """
+    Find a lab result PDF file that matches the patient name using fuzzy matching.
+    
+    :param patient_name: Name of the patient to search for.
+    :param lab_dir: Directory containing lab result PDFs.
+    :return: Path to the matching PDF file, or None if no match is found.
+    """
+    try:
+        lab_dir_path = Path(lab_dir)
+        if not lab_dir_path.exists():
+            logging.warning(f"Lab results directory does not exist: {lab_dir}")
+            return None
+        
+        best_match = None
+        best_score = 0.0
+        threshold = 0.7  # Similarity threshold
+        
+        # Normalize patient name for comparison
+        patient_name = patient_name.lower().strip()
+        
+        for pdf_file in lab_dir_path.glob('*.pdf'):
+            # Extract filename without extension for comparison
+            filename = pdf_file.stem.lower()
+            
+            # Calculate similarity score
+            similarity = SequenceMatcher(None, patient_name, filename).ratio()
+            
+            if similarity > threshold and similarity > best_score:
+                best_score = similarity
+                best_match = pdf_file
+        
+        if best_match:
+            logging.info(f"Found matching lab result for {patient_name}: {best_match} (score: {best_score:.2f})")
+            return best_match
+        else:
+            logging.warning(f"No matching lab result found for {patient_name}")
+            return None
+    
+    except Exception as e:
+        logging.error(f"Error finding matching lab result for {patient_name}: {e}")
+        return None
+
+def extract_patient_name_from_text(text):
+    """
+    Extract patient name from the OCR text.
+    
+    :param text: OCR text from the patient form.
+    :return: Patient name as a string or None if not found.
+    """
+    try:
+        # Look for patterns that might indicate a name
+        # This is a simple approach and may need adjustment based on actual form structure
+        lines = text.split('\n')
+        for i, line in enumerate(lines):
+            # Look for lines that might contain the patient name
+            # Check for typical field labels
+            if re.search(r'Nome\s+do\s+participante|Nome\s+paciente|Paciente|Nome\s+completo', line, re.IGNORECASE):
+                # The name might be in the same line after a colon or in the next line
+                if ':' in line:
+                    return line.split(':', 1)[1].strip()
+                elif i + 1 < len(lines):
+                    return lines[i + 1].strip()
+            
+            # Try to find all-caps names that are typically patient identifiers
+            if line and line.strip() and line.isupper() and len(line.split()) >= 2:
+                return line.strip()
+        
+        # If no clear patient name field is found, look for an all-caps line that could be a name
+        for line in lines:
+            if line and line.strip() and len(line.split()) >= 2 and not re.search(r'\d', line):
+                # Heuristic: lines with 2+ words, no digits, might be names
+                return line.strip()
+        
+        return None
+    except Exception as e:
+        logging.error(f"Error extracting patient name from text: {e}")
+        return None
+
+def combine_form_and_lab_data(form_text, lab_text):
+    """
+    Combine form data and lab data for processing.
+    
+    :param form_text: Text extracted from the patient form.
+    :param lab_text: Text extracted from the lab results.
+    :return: Combined text for processing.
+    """
+    combined_text = "=== PATIENT FORM DATA ===\n\n"
+    combined_text += form_text
+    combined_text += "\n\n=== LABORATORY RESULTS ===\n\n"
+    combined_text += lab_text if lab_text else "No laboratory results found."
+    return combined_text
